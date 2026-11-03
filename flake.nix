@@ -73,9 +73,18 @@
 
             src = lib.cleanSource ./.;
 
+            zigDeps = pkgs.zig_0_17.fetchDeps {
+              inherit (finalAttrs) src pname version;
+              hash = "sha256-Kp/mn+c0yQoJCUPt3F1qMNx5pZuInaEQrsgfkoZP6iM=";
+            };
+
             nativeBuildInputs = with pkgs; [
               zig_0_17
             ];
+
+            postConfigure = ''
+              ln -s ${finalAttrs.zigDeps} "$ZIG_GLOBAL_CACHE_DIR/p"
+            '';
 
             doCheck = true;
 
