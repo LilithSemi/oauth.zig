@@ -1,0 +1,19 @@
+.{
+    .name = .oauth,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x4da78c4518eed8c,
+    .dependencies = .{
+        .zurl = .{
+            .url = "git+https://git.lilithsemi.com/LilithSemi/zurl#ef87f7ca04561d8587fd51a778ddb2bc09618ae9",
+            .hash = "zurl-0.1.0-eM4POUgfkADfHt2x-kOKhy8Cuq6TPv_ANKZSxM1VPYRR",
+        },
+    },
+    .paths = .{
+        "build.zig.zon",
+        "build.zig",
+        "lib",
+        "LICENSE",
+        "README.md",
+    },
+}
