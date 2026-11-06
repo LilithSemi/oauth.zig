@@ -14,9 +14,15 @@ pub const Metadata = struct {
     authorization_endpoint: []const u8,
     token_endpoint: []const u8,
     jwks_uri: []const u8,
+    userinfo_endpoint: ?[]const u8 = null,
     device_authorization_endpoint: ?[]const u8 = null,
     revocation_endpoint: ?[]const u8 = null,
+    introspection_endpoint: ?[]const u8 = null,
+    end_session_endpoint: ?[]const u8 = null,
     code_challenge_methods_supported: []const []const u8 = &.{},
+    id_token_signing_alg_values_supported: []const []const u8 = &.{},
+    scopes_supported: []const []const u8 = &.{},
+    grant_types_supported: []const []const u8 = &.{},
 
     pub fn endpoints(self: Metadata) Endpoints {
         return .{
@@ -34,19 +40,30 @@ pub fn discover(arena: Allocator, transport: Transport, issuer: []const u8) Disc
     try url.checkUrl(issuer);
     const base = std.mem.trimEnd(u8, issuer, "/");
     const location = try std.fmt.allocPrint(arena, "{s}/.well-known/openid-configuration", .{base});
-    const body = try getBody(arena, transport, location);
+    return discoverAt(arena, transport, location, issuer);
+}
+
+/// Discovers an issuer whose metadata URL is not derived from its issuer URL.
+/// This is useful for providers with tenant, application, or client-specific discovery paths.
+pub fn discoverAt(arena: Allocator, transport: Transport, discovery_url: []const u8, expected_issuer: []const u8) DiscoverError!Metadata {
+    try url.checkUrl(discovery_url);
+    try url.checkUrl(expected_issuer);
+    const body = try getBody(arena, transport, discovery_url);
     const metadata = std.json.parseFromSliceLeaky(Metadata, arena, body, .{
         .ignore_unknown_fields = true,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.MalformedResponse,
     };
-    if (!std.mem.eql(u8, metadata.issuer, issuer)) return error.IssuerMismatch;
+    if (!std.mem.eql(u8, metadata.issuer, expected_issuer)) return error.IssuerMismatch;
     try url.checkUrl(metadata.authorization_endpoint);
     try url.checkUrl(metadata.token_endpoint);
     try url.checkUrl(metadata.jwks_uri);
     if (metadata.device_authorization_endpoint) |one| try url.checkUrl(one);
     if (metadata.revocation_endpoint) |one| try url.checkUrl(one);
+    if (metadata.userinfo_endpoint) |one| try url.checkUrl(one);
+    if (metadata.introspection_endpoint) |one| try url.checkUrl(one);
+    if (metadata.end_session_endpoint) |one| try url.checkUrl(one);
     return metadata;
 }
 
@@ -249,6 +266,55 @@ test "discover refuses another issuer and an unsafe endpoint" {
     defer arena.deinit();
     try testing.expectError(error.IssuerMismatch, discover(arena.allocator(), fake.transport(), "https://other.example"));
     try testing.expectError(error.UrlNotSafe, discover(arena.allocator(), fake.transport(), "https://issuer.example"));
+}
+
+test "discoverAt accepts Authentik application discovery paths and optional metadata" {
+    const authentik_metadata =
+        \\{"issuer":"https://auth.example/application/o/my-app/","authorization_endpoint":"https://auth.example/application/o/authorize/",
+        \\"token_endpoint":"https://auth.example/application/o/token/","jwks_uri":"https://auth.example/application/o/my-app/jwks/",
+        \\"userinfo_endpoint":"https://auth.example/application/o/userinfo/","device_authorization_endpoint":"https://auth.example/application/o/device/",
+        \\"revocation_endpoint":"https://auth.example/application/o/revoke/","end_session_endpoint":"https://auth.example/application/o/my-app/end-session/",
+        \\"code_challenge_methods_supported":["S256"],"scopes_supported":["openid","email"],"grant_types_supported":["authorization_code","refresh_token"]}
+    ;
+    var fake = FakeTransport.init(testing.allocator, &.{.{ .body = authentik_metadata }});
+    defer fake.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const metadata = try discoverAt(
+        arena.allocator(),
+        fake.transport(),
+        "https://auth.example/application/o/my-app/.well-known/openid-configuration",
+        "https://auth.example/application/o/my-app/",
+    );
+    try testing.expectEqualStrings("https://auth.example/application/o/my-app/.well-known/openid-configuration", fake.sent.items[0].url);
+    try testing.expectEqualStrings("S256", metadata.code_challenge_methods_supported[0]);
+    try testing.expectEqualStrings("openid", metadata.scopes_supported[0]);
+    try testing.expectEqualStrings("https://auth.example/application/o/userinfo/", metadata.userinfo_endpoint.?);
+    try testing.expectEqualStrings("https://auth.example/application/o/my-app/end-session/", metadata.end_session_endpoint.?);
+}
+
+test "discoverAt accepts Kanidm client-specific OIDC discovery" {
+    const kanidm_metadata =
+        \\{"issuer":"https://idm.example/oauth2/openid/my-client","authorization_endpoint":"https://idm.example/oauth2/authorise",
+        \\"token_endpoint":"https://idm.example/oauth2/token","jwks_uri":"https://idm.example/oauth2/openid/my-client/public_key.jwk",
+        \\"revocation_endpoint":"https://idm.example/oauth2/token/revoke","introspection_endpoint":"https://idm.example/oauth2/token/introspect",
+        \\"code_challenge_methods_supported":["S256"],"id_token_signing_alg_values_supported":["ES256"]}
+    ;
+    var fake = FakeTransport.init(testing.allocator, &.{.{ .body = kanidm_metadata }});
+    defer fake.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const metadata = try discoverAt(
+        arena.allocator(),
+        fake.transport(),
+        "https://idm.example/oauth2/openid/my-client/.well-known/openid-configuration",
+        "https://idm.example/oauth2/openid/my-client",
+    );
+    try testing.expectEqualStrings("ES256", metadata.id_token_signing_alg_values_supported[0]);
+    try testing.expectEqualStrings("https://idm.example/oauth2/token/introspect", metadata.introspection_endpoint.?);
+    try testing.expectEqualStrings("https://idm.example/oauth2/openid/my-client/.well-known/openid-configuration", fake.sent.items[0].url);
 }
 
 fn verifyFixture(gpa: Allocator) !void {
